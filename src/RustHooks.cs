@@ -6,12 +6,14 @@ using Oxide.Core.Libraries.Covalence;
 using Oxide.Core.Plugins;
 using Oxide.Core.RemoteConsole;
 using Oxide.Game.Rust.Libraries.Covalence;
-using Rust.Ai;
-using Rust.Ai.HTN;
 using Steamworks;
+using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Net;
+using System.Reflection;
+using System.Text;
 using System.Text.RegularExpressions;
 using UnityEngine;
 
@@ -40,100 +42,6 @@ namespace Oxide.Game.Rust
             return entity is BasePlayer ? null : Interface.CallHook("OnEntityTakeDamage", entity, hitInfo);
         }
 
-        private int GetPlayersSensed(NPCPlayerApex npc, Vector3 position, float distance, BaseEntity[] targetList)
-        {
-            return BaseEntity.Query.Server.GetInSphere(position, distance, targetList,
-                entity =>
-                {
-                    BasePlayer target = entity as BasePlayer;
-                    object callHook = target != null && npc != null && target != npc ? Interface.CallHook("OnNpcTarget", npc, target) : null;
-                    if (callHook != null)
-                    {
-                        foreach (Memory.SeenInfo seenInfo in npc.AiContext.Memory.All)
-                        {
-                            if (seenInfo.Entity == target)
-                            {
-                                npc.AiContext.Memory.All.Remove(seenInfo);
-                                break;
-                            }
-                        }
-
-                        foreach (Memory.ExtendedInfo extendedInfo in npc.AiContext.Memory.AllExtended)
-                        {
-                            if (extendedInfo.Entity == target)
-                            {
-                                npc.AiContext.Memory.AllExtended.Remove(extendedInfo);
-                                break;
-                            }
-                        }
-                    }
-
-                    return target != null && callHook == null && target.isServer && !target.IsSleeping() && !target.IsDead() && target.Family != npc.Family;
-                });
-        }
-
-        /// <summary>
-        /// Called when an Apex NPC player tries to target an entity based on closeness
-        /// </summary>
-        /// <param name="npc"></param>
-        /// <returns></returns>
-        [HookMethod("IOnNpcSenseClose")]
-        private object IOnNpcSenseClose(NPCPlayerApex npc)
-        {
-            NPCPlayerApex.EntityQueryResultCount = GetPlayersSensed(npc, npc.ServerPosition, npc.Stats.CloseRange, NPCPlayerApex.EntityQueryResults);
-            return true;
-        }
-
-        /// <summary>
-        /// Called when an Apex NPC player tries to target an entity based on vision
-        /// </summary>
-        /// <param name="npc"></param>
-        /// <returns></returns>
-        [HookMethod("IOnNpcSenseVision")]
-        private object IOnNpcSenseVision(NPCPlayerApex npc)
-        {
-            NPCPlayerApex.PlayerQueryResultCount = GetPlayersSensed(npc, npc.ServerPosition, npc.Stats.VisionRange, NPCPlayerApex.PlayerQueryResults);
-            return true;
-        }
-
-        /// <summary>
-        /// Called when an Apex NPC player (i.e. murderer) tries to target an entity
-        /// </summary>
-        /// <param name="npc"></param>
-        /// <param name="target"></param>
-        /// <returns></returns>
-        [HookMethod("IOnNpcTarget")]
-        private object IOnNpcTarget(NPCPlayerApex npc, BaseEntity target)
-        {
-            if (Interface.CallHook("OnNpcTarget", npc, target) != null)
-            {
-                return 0f;
-            }
-
-            return null;
-        }
-
-        /// <summary>
-        /// Called when an HTN NPC player (old scientist) tries to target an entity
-        /// </summary>
-        /// <param name="npc"></param>
-        /// <param name="target"></param>
-        /// <param name="index"></param>
-        /// <returns></returns>
-        [HookMethod("IOnNpcTarget")]
-        private object IOnNpcTarget(IHTNAgent npc, BasePlayer target, int index)
-        {
-            if (npc != null && Interface.CallHook("OnNpcTarget", npc.Body, target) != null)
-            {
-                npc.AiDomain.NpcContext.PlayersInRange.RemoveAt(index);
-                npc.AiDomain.NpcContext.BaseMemory.Forget(0f); // Unsure if still needed
-                npc.AiDomain.NpcContext.BaseMemory.PrimaryKnownEnemyPlayer.PlayerInfo.Player = null; // Unsure if still needed
-                return true;
-            }
-
-            return null;
-        }
-
         /// <summary>
         /// Called when an NPC animal tries to target an entity
         /// </summary>
@@ -148,8 +56,11 @@ namespace Oxide.Game.Rust
                 npc.SetFact(BaseNpc.Facts.HasEnemy, 0);
                 npc.SetFact(BaseNpc.Facts.EnemyRange, 3);
                 npc.SetFact(BaseNpc.Facts.AfraidRange, 1);
-                npc.AiContext.EnemyPlayer = null;
-                npc.AiContext.LastEnemyPlayerScore = 0f;
+
+                //TODO: Find replacements of those:
+                // npc.AiContext.EnemyPlayer = null;
+                // npc.AiContext.LastEnemyPlayerScore = 0f;
+
                 npc.playerTargetDecisionStartTime = 0f;
                 return 0f;
             }
@@ -270,8 +181,8 @@ namespace Oxide.Game.Rust
         /// <param name="playerName"></param>
         /// <param name="reason"></param>
         /// <param name="expiry"></param>
-        [HookMethod("IOnServerUsersSet")]
-        private void IOnServerUsersSet(ulong steamId, ServerUsers.UserGroup group, string playerName, string reason, long expiry)
+        [HookMethod("OnServerUserSet")]
+        private void OnServerUserSet(ulong steamId, ServerUsers.UserGroup group, string playerName, string reason, long expiry)
         {
             if (serverInitialized && group == ServerUsers.UserGroup.Banned)
             {
@@ -286,8 +197,8 @@ namespace Oxide.Game.Rust
         /// Called when a server group is removed for an ID (i.e. unbanned)
         /// </summary>
         /// <param name="steamId"></param>
-        [HookMethod("IOnServerUsersRemove")]
-        private void IOnServerUsersRemove(ulong steamId)
+        [HookMethod("OnServerUserRemove")]
+        private void OnServerUserRemove(ulong steamId)
         {
             if (serverInitialized && ServerUsers.users.ContainsKey(steamId) && ServerUsers.users[steamId].group == ServerUsers.UserGroup.Banned)
             {
@@ -397,8 +308,7 @@ namespace Oxide.Game.Rust
         [HookMethod("IOnPlayerCommand")]
         private void IOnPlayerCommand(BasePlayer basePlayer, string message)
         {
-            // Check if using Rust+ app
-            if (basePlayer == null || !basePlayer.IsConnected)
+            if (basePlayer == null)
             {
                 return;
             }
@@ -418,6 +328,14 @@ namespace Oxide.Game.Rust
                 return;
             }
 
+            // Check if using Rust+ app
+            if (!basePlayer.IsConnected)
+            {
+                Interface.CallHook("OnApplicationCommand", basePlayer, cmd, args);
+                Interface.CallHook("OnApplicationCommand", basePlayer.IPlayer, cmd, args);
+                return;
+            }
+
             // Is the command blocked?
             object commandSpecific = Interface.CallHook("OnPlayerCommand", basePlayer, cmd, args);
             object commandCovalence = Interface.CallHook("OnUserCommand", basePlayer.IPlayer, cmd, args);
@@ -427,13 +345,48 @@ namespace Oxide.Game.Rust
                 return;
             }
 
-            // Is it a valid chat command?
-            if (!Covalence.CommandSystem.HandleChatMessage(basePlayer.IPlayer, str) && !cmdlib.HandleChatCommand(basePlayer, cmd, args))
+            try
             {
-                if (Interface.Oxide.Config.Options.Modded)
+                // Is it a valid chat command?
+                if (!Covalence.CommandSystem.HandleChatMessage(basePlayer.IPlayer, str) && !cmdlib.HandleChatCommand(basePlayer, cmd, args))
                 {
-                    basePlayer.IPlayer.Reply(string.Format(lang.GetMessage("UnknownCommand", this, basePlayer.IPlayer.Id), cmd));
+                    if (Interface.Oxide.Config.Options.Modded)
+                    {
+                        basePlayer.IPlayer.Reply(string.Format(lang.GetMessage("UnknownCommand", this, basePlayer.IPlayer.Id), cmd));
+                    }
                 }
+            }
+            catch (Exception ex)
+            {
+                Exception innerException = ex;
+                string errorMessage = string.Empty;
+                string pluginName = string.Empty;
+                StringBuilder stackTraceSb = new StringBuilder();
+                while (innerException != null)
+                {
+                    string name = innerException.GetType().Name;
+                    errorMessage = $"{name}: {innerException.Message}".TrimEnd(' ', ':');
+                    stackTraceSb.AppendLine(innerException.StackTrace);
+                    if (innerException.InnerException != null)
+                    {
+                        stackTraceSb.AppendLine($"Rethrow as {name}");
+                    }
+                    innerException = innerException.InnerException;
+                }
+
+                StackTrace stackTrace = new StackTrace(ex, 0, true);
+                for (int i = 0; i < stackTrace.FrameCount; i++)
+                {
+                    StackFrame frame = stackTrace.GetFrame(i);
+                    MethodBase method = frame.GetMethod();
+                    if (method is null || method.DeclaringType is null) continue;
+                    if (method.DeclaringType.Namespace == "Oxide.Plugins")
+                    {
+                        pluginName = method.DeclaringType.Name;
+                    }
+                }
+
+                Interface.Oxide.LogError($"Failed to run command '/{cmd}' on plugin '{pluginName}'. ({errorMessage.Replace(Environment.NewLine, " ")}){Environment.NewLine}{stackTrace}");
             }
         }
 
@@ -657,10 +610,10 @@ namespace Oxide.Game.Rust
         }
 
         /// <summary>
-        /// Called when the server is updating Steam information
+        /// Called when the server has updated Steam information
         /// </summary>
-        [HookMethod("IOnUpdateServerInformation")]
-        private void IOnUpdateServerInformation()
+        [HookMethod("OnServerInformationUpdated")]
+        private void OnServerInformationUpdated()
         {
             // Add Steam tags for Oxide
             SteamServer.GameTags += ",oxide";
@@ -670,67 +623,17 @@ namespace Oxide.Game.Rust
             }
         }
 
-        /// <summary>
-        /// Called when the server description is updating
-        /// </summary>
-        [HookMethod("IOnUpdateServerDescription")]
-        private void IOnUpdateServerDescription()
-        {
-            // Fix for server description not always updating
-            SteamServer.SetKey("description_0", string.Empty);
-        }
-
         #endregion Server Hooks
 
         #region Deprecated Hooks
 
-        [HookMethod("OnExperimentStart")]
-        private object OnExperimentStart(Workbench workbench, BasePlayer player)
+        [HookMethod("OnVendingShopOpened")]
+        private void OnVendingShopOpened(VendingMachine vendingMachine, BasePlayer player)
         {
-            return Interface.Oxide.CallDeprecatedHook("CanExperiment", "OnExperimentStart(Workbench workbench, BasePlayer player)",
-                new System.DateTime(2021, 12, 31), player, workbench);
+            Interface.Oxide.CallDeprecatedHook("OnOpenVendingShop", "OnVendingShopOpened(VendingMachine vendingMachine, BasePlayer player)",
+                new System.DateTime(2022, 10, 6), vendingMachine, player);
         }
 
-        [HookMethod("OnPlayerCorpseSpawned")]
-        private object OnPlayerCorpseSpawned(BasePlayer player, BaseCorpse corpse)
-        {
-            return Interface.Oxide.CallDeprecatedHook("OnPlayerCorpse", "OnPlayerCorpseSpawned(BasePlayer player, BaseCorpse corpse)",
-                new System.DateTime(2021, 12, 31), player, corpse);
-        }
-
-        [HookMethod("OnVehiclePush")]
-        private object OnVehiclePush(BaseVehicle vehicle, BasePlayer player)
-        {
-            if (vehicle is MotorRowboat)
-            {
-                return Interface.Oxide.CallDeprecatedHook("CanPushBoat", "CanPushVehicle(BaseVehicle vehicle, BasePlayer player)",
-                new System.DateTime(2021, 12, 31), player, vehicle as MotorRowboat);
-            }
-
-            return null;
-        }
-
-        [HookMethod("OnFuelConsume")]
-        private void OnFuelConsume(BaseOven oven, Item fuel, ItemModBurnable burnable)
-        {
-            Interface.Oxide.CallDeprecatedHook("OnConsumeFuel", "OnFuelConsume(BaseOven oven, Item fuel, ItemModBurnable burnable)",
-                new System.DateTime(2021, 12, 31), oven, fuel, burnable);
-        }
-
-        [HookMethod("OnEntitySaved")]
-        private void OnEntitySaved(Elevator elevator, BaseNetworkable.SaveInfo saveInfo)
-        {
-            Interface.Oxide.CallDeprecatedHook("OnElevatorSaved", "OnEntitySaved(Elevator elevator, BaseNetworkable.SaveInfo saveInfo)",
-                new System.DateTime(2021, 12, 31), elevator, saveInfo);
-        }
-
-        [HookMethod("OnResearchCostDetermine")]
-        private object OnResearchCostDetermine(Item item, ResearchTable table)
-        {
-            return Interface.Oxide.CallDeprecatedHook("OnItemScrap", "OnResearchCostDetermine(Item item, ResearchTable table)",
-                new System.DateTime(2021, 12, 31), table, item);
-        }
-
-        #endregion Deprecated Hooks
+        #endregion
     }
 }
